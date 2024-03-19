@@ -1,0 +1,725 @@
+---
+title: "STA141A Project"
+author: "Carine Wong"
+date: "2024-02-09"
+output: html_document
+---
+# Predicting Success of Mouse Engagement to Visual Stimuli
+
+## Abstract
+
+What factors contribute to a mouse's success rate when given visual stimuli? To further explore the findings of Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al (2019), I conducted exploratory data analysis on features of the data, leading me to finding differences in responses between mice, between each mouse's sessions, and trial types. I explored their neural activity, seeing differences in firing rates between sessions and between successful and failure trials in each session. There were many roadblocks that appeared: for example, the neurons that are tracked in each session differ from each other, making it difficult to come up with meaningful analyses about neuron firings and the probability of a successful trial. Using these findings, I created logistic regression models to predict the correctness of a mouse's response given the contrast of visual stimuli. In consideration of the differences between sessions and between mice, my final model uses only the data from the session each test set is drawn from. It accounts for the time within a trial, the type of test conducted on the mouse (depending on the brightness contrasts of the two illuminated panels), and the firing rate of neurons within a trial in a session.
+
+
+## Section 1: Introduction
+```{r, echo=FALSE}
+#import data
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+}
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#needed packages: dplyr, ggplot
+library(tidyverse)
+library(pROC)
+library(caret)
+```
+
+In this project, I am exploring sessions data to create a predictive model for mouse feedback (turning of a wheel) to visual stimuli (two salient screens). The following sessions will elaborate on the processes by which I conducted exploratory data analysis and going about the predictive modeling. Since we are predicting a binary outcome, I am choosing to use logistic regression for my models. Additionally, I used bootstrapping to fine-tune my model's coefficients. The results are somewhat surprising, with my least accurate model being the most accurate for predicting Session 1's test data.
+
+## Section 2: Exploratory Analysis
+
+In our data, there are 4 observed rats across the 18 sessions.
+
+- Cori: Sessions 1-3
+
+- Forssman: Sessions 4-7
+
+- Hench: Sessions 8-11
+
+- Lederberg: Sessions 12-18
+
+
+To help reduce the redundancy of my code, I created a "type" variable under each session to represent the type of test administered to the rat. The notations are as follows: 
+
+1. l = contrast left higher
+
+2. r = contrast right higher
+
+3. n = both contrasts are 0
+
+4. e = both contrasts are equal and nonzero
+
+```{r, echo=FALSE}
+#labeling each test's type, adding it under variable "type" for each session
+
+test_type <- data.frame()
+for (j in 1:18) {
+  for (i in 1:length(session[[j]]$contrast_left)) {
+    if (session[[j]]$contrast_left[i] > session[[j]]$contrast_right[i]) {
+      test_type[i, j] <- "l"
+    } else if (session[[j]]$contrast_left[i] < session[[j]]$contrast_right[i]) {
+      test_type[i, j] <- "r"
+    } else if (session[[j]]$contrast_left[i] == 0 & session[[j]]$contrast_right[i] == 0) {
+      test_type[i, j] <- "n"
+    } else {
+      test_type[i, j] <- "e"
+    }
+  }
+}
+
+#add it to the session data
+test_type_tmp <- c()
+for (k in 1:18) {
+  test_type_tmp <- test_type[, k]
+  test_type_tmp <- test_type_tmp[complete.cases(test_type[, k])]
+  session[[k]]$type <- test_type_tmp
+}
+```
+
+### Success rate of each test
+
+Below, I plotted the success rates of each test type per session. There are four mice represented across the 18 trials, and visually, there seems to be different performances per mouse Visually, some mice, such as Forssmann, seem to exhibit a trend in performance between test types (see graphs 4-7 below.) Mouse Lederberg, for example, exhibits a relatively strong trend of performing better on the L and R tests than N or E tests, while Cori does not exhibit such a trend and has varied performance across sessions. This leads me to believe that there are some significant differences between mice and and their performance on specific test types. Going forward, since our test data will be from sessions 1 and 18 (Mice Cori and Lederberg), I will only be looking at data from those two mice to minimize noise from differences between test mice.
+
+
+```{r, echo=FALSE}
+#plotting the success rate of each type of test per session
+
+tmp_df <- data.frame()
+for (rat in 1:18) {
+  tmp_df <- data.frame("type" = session[[rat]]$type, "feedback" = session[[rat]]$feedback_type)
+  
+  # Make table of proportion of successes for each test type
+  prob_table <- aggregate(tmp_df$feedback, by = list(tmp_df$type), FUN = function(x) sum(x == 1) / length(x))
+  colnames(prob_table) <- c("Type of Test", "Probability_of_Success")
+  assign(paste0("prob_table_", rat), prob_table)
+}
+
+#Plot the probability tables
+
+#Cori
+par(mfrow = c(1, 3))
+for (i in 1:3) {
+  prob_table <- get(paste0("prob_table_", i))
+  barplot(prob_table$Probability_of_Success, 
+          names.arg = prob_table$`Type of Test`, 
+          col = "skyblue",
+          xlab = "Test Type",
+          ylab = "Probability of Success",
+          main = paste("Session", i, "(Cori)"))}
+
+#Forssman
+par(mfrow = c(1, 4))
+for (i in 4:7) {
+  prob_table <- get(paste0("prob_table_", i))
+  barplot(prob_table$Probability_of_Success, 
+          names.arg = prob_table$`Type of Test`, 
+          col = "pink",
+          xlab = "Test Type",
+          ylab = "Probability of Success",
+          main = paste("Session", i, "(Forssman)"))}
+
+#Hench
+par(mfrow = c(1, 4))
+for (i in 8:11) {
+  prob_table <- get(paste0("prob_table_", i))
+  barplot(prob_table$Probability_of_Success, 
+          names.arg = prob_table$`Type of Test`, 
+          col = "limegreen",
+          xlab = "Test Type",
+          ylab = "Probability of Success",
+          main = paste("Session", i, "(Hench)"))}
+
+#Lederberg
+num_cols <- ceiling(7 / 2)
+par(mfrow = c(2, num_cols))
+for (i in 12:18) {
+  prob_table <- get(paste0("prob_table_", i))
+  barplot(prob_table$Probability_of_Success, 
+          names.arg = prob_table$`Type of Test`, 
+          col = "yellow",
+          xlab = "Test Type",
+          ylab = "Probability of Success",
+          main = paste("Session", i, "(Lederberg)"))}
+```
+
+
+
+For some general insight on success rates of the types of trials, I created a table of success rates across all rats. Left and Right trials have very similar success rates of ~0.75, which is expected: since the two test types involve similar reasoning and are simply opposites of each other, the success rates are also similar. "N tests" (where both screens have 0 brightness and the mouse is expected to hold the wheel still) reasonably have a lower success rate than left and right tests. I hypothesize that this is due to the lack of obvious, salient stimuli from the screens, and therefore doesn't result in as strong of a trained association for the rat. The "E tests", where the screens are both nonzero and equal, the rate at which trials are deemed successes or failures is randomized and equally likely. Across all sessions, the success rate for this type of test is 0.5, which is anticipated as the scientists are effectively flipping a coin. Results are plotted in the below barplot.
+
+```{r, echo=FALSE}
+#success rates of each test for ALL RATS
+
+type_all <- c(session[[1]]$type)
+feedback_all <- c(session[[1]]$feedback_type)
+nrat <- c(replicate(114, 1))
+for (rat in 2:18) {
+  type_all <- append(type_all, session[[rat]]$type)
+  feedback_all <- append(feedback_all, session[[rat]]$feedback_type)
+  length <- length(session[[rat]]$feedback_type)
+  nrat <- append(nrat, replicate(length, rat))
+}
+
+all_df <- data.frame("type" = type_all, "feedback" = feedback_all, "nrat" = nrat)
+
+# Make table of proportion of successes for each type of test
+prob_table <- aggregate(all_df$feedback, by = list(all_df$type), FUN = function(x) sum(x == 1) / length(x))
+colnames(prob_table) <- c("Type of Test", "Probability of Success")
+print(prob_table)
+```
+
+```{r, echo=FALSE}
+#Plot the above information
+ggplot(prob_table, aes(x=prob_table[,1], y=prob_table[,2])) + geom_bar(stat = "identity", fill = "blue", color = "black") + labs(title = "Frequency of Success for Each Test Type for All Rats", x = "Type of Test", y = "Frequency of Success")
+```
+
+```{r, echo=FALSE}
+success_frs <- c()
+failure_frs <- c()
+#compute firing rate for successes and failures
+for (rat in 1:18) {
+  #add a vector: firing rate to each session
+  firing_rate <- c()
+  for (i in 1:length(session[[rat]]$time)) {
+    new_fr <- sum(session[[rat]]$spks[[i]] == 1) / (nrow(session[[rat]]$spks[[i]]) * ncol(session[[rat]]$spks[[i]]))
+    firing_rate <- append(firing_rate, new_fr)
+  }
+  session[[rat]]$firing_rate <- firing_rate
+  
+  #compute mean firing rates 
+  #cat("Session", rat, ":", "\n")
+  failure <- which(session[[rat]]$feedback_type == -1)
+  success <- which(session[[rat]]$feedback_type == 1)
+  mean_fr_success <- mean(firing_rate[c(success)], na.rm=TRUE)
+  #cat("mean firing rate for success trials:", mean_fr_success, "\n")
+  success_frs <- append(success_frs, mean_fr_success)
+  mean_fr_failure <- mean(firing_rate[c(-success)], na.rm=TRUE)
+  #cat("mean firing rate for failure trials:", mean_fr_failure, "\n")
+  failure_frs <- append(failure_frs, mean_fr_failure)
+  if (mean_fr_failure < mean_fr_success) {
+    #cat("success firing rate > failure firing rate")
+    #cat("\n")
+    #cat("\n")
+  }
+}
+
+```
+
+
+## Section 3: Data Integration
+
+###Exploring Neural Data and Firing Rate
+
+In order to see if there's a relationship between firing rate and success, I am calculating the proportion of neurons in each session that activates during the trial. I plotted the mean firing rate per session. The colors differentiate between successful trials within the session and failed ones. As the red line is consistently above the blue line in this plot, the mean firing rate for successful trials is higher than the mean firing rate for failed trials across all sessions. However, as shown by the bands around the plotted lines, there is lots of variability between firing rates in the sessions. This is primarily due to a different number and distribution of neurons measured from session to session. 
+
+```{r, echo=FALSE, warning=FALSE}
+frs1 <- data.frame("firing_rates" = success_frs, "session_n" = c(1:18), "test_success" = rep("successful trial firing rate", length(success_frs)))
+frs2 <- data.frame("firing_rates" = failure_frs, "session_n" = c(1:18), "test_success" = rep("failed trial firing rate", length(failure_frs)))
+frs <- rbind(frs1, frs2)
+ggplot(data = frs) + 
+  geom_smooth(aes(x = session_n, y=firing_rates, fill = test_success, color = test_success), alpha = 0.2) + 
+  scale_fill_manual(values = c("blue", "red")) +
+  scale_color_manual(values = c("blue", "red")) +
+  labs(title = "Density plot of firing rates for successful and failed trials per session")
+
+```
+
+
+Upon reading the research paper associated with this data set, I learned that the brain areas that had neuron spikes aren't a greatly predictive variable for feedback. Additionally, brain areas and neurons that are measured from session to session are different, making it difficult to distinguish if there are neuron-to-neuron differences, and if the same proportion of neurons for each brain area are being measured. With these two points in mind, I did not further explore firing rate to prevent adding unnecessary noise to my predictive models.
+
+### Exploring Time data
+
+To see if mice do any learning throughout the trials or between sessions, I explored time data by plotting time against trial feedback for Sessions with mice Cori and Lederberg. Orange lines indicate sessions observed of mouse Cori, and green lines indicate sessions observed of mouse Lederberg. Firstly, as evident by the length of the lines, sessions have varying numbers of trials. Additionally, there seems to be a decrease in feedback success in all trials later within each session. For some sessions, this decrease is drastic, and we can see that in the sharp drop-off in feedback success as trials go on within the session. Some sessions experience an incrase in feedback success initially. This might be due to some learning that occurs in the first few trials. I speculate that this overall relationship is due to fatigue, as mice are in sessions for hundreds of trials.  The relationship is polynomial, and I believe that this variable is important to predicting the feedback success of trials. 
+
+
+```{r, echo=FALSE}
+#explore time data
+
+feed_time <- data.frame()
+for (rat in c(1,2,3,12,13,14,15,16,17,18)) {
+  tmp_feed <- as.vector(session[[rat]]$feedback_type)
+  tmp_type <- as.vector(session[[rat]]$type)
+  if (rat == 1) {
+    tmp_feed <- unlist(tmp_feed)
+  }
+  tmp_time <- c()
+  for (i in session[[rat]]$time) {
+    tmp_time <- append(tmp_time, i[1])
+  }
+  tmp_len <- length(tmp_time)
+  session_n <- replicate(tmp_len, rat)
+  tmp_feed_time <- cbind(tmp_feed, tmp_time, session_n, tmp_type)
+  tmp_feed_time <- as.data.frame(tmp_feed_time)
+  #print(tmp_feed_time)
+  feed_time <- rbind(feed_time, tmp_feed_time)
+  
+}
+feed_time$tmp_feed <- as.numeric(feed_time$tmp_feed)
+feed_time$tmp_time <- as.numeric(feed_time$tmp_time)
+feed_time$session_n <- as.numeric(feed_time$session_n)
+```
+
+```{r, echo=FALSE}
+feed_time_1 <- filter(feed_time, session_n == 1)
+feed_time_2<- filter(feed_time, session_n == 2)
+feed_time_3 <- filter(feed_time, session_n == 3)
+feed_time_12 <- filter(feed_time, session_n == 12)
+feed_time_13 <- filter(feed_time, session_n == 13)
+feed_time_14 <- filter(feed_time, session_n == 14)
+feed_time_15 <- filter(feed_time, session_n == 15)
+feed_time_16 <- filter(feed_time, session_n == 16)
+feed_time_17 <- filter(feed_time, session_n == 17)
+feed_time_18 <- filter(feed_time, session_n == 18)
+```
+
+```{r, echo=FALSE}
+#trying to plot all lines on on one graph 
+ggplot() + 
+  geom_smooth(data = feed_time_1, aes(x=tmp_time, y=tmp_feed), method = "gam", se = FALSE, color = "orangered1") + 
+  geom_smooth(data = feed_time_2, aes(x=tmp_time, y=tmp_feed), method = "gam", se = FALSE, color = "orangered2") + 
+  geom_smooth(data = feed_time_3, aes(x=tmp_time, y=tmp_feed), method = "gam", se = FALSE, color = "orangered3") + 
+  geom_smooth(data = feed_time_12, aes(x=tmp_time, y=tmp_feed), method = "gam", se = FALSE, color = "olivedrab1") +
+  geom_smooth(data = feed_time_13, aes(x=tmp_time, y=tmp_feed), method = "gam", se = FALSE, color = "olivedrab2") +
+  geom_smooth(data = feed_time_14, aes(x=tmp_time, y=tmp_feed), method = "gam", se = FALSE, color = "olivedrab3") +
+  geom_smooth(data = feed_time_15, aes(x=tmp_time, y=tmp_feed), method = "gam", se = FALSE, color = "olivedrab4") +
+  geom_smooth(data = feed_time_16, aes(x=tmp_time, y=tmp_feed), method = "gam", se = FALSE, color = "chartreuse4") +
+  geom_smooth(data = feed_time_17, aes(x=tmp_time, y=tmp_feed), method = "gam", se = FALSE, color = "green4") +
+  geom_smooth(data = feed_time_18, aes(x=tmp_time, y=tmp_feed), method = "gam", se = FALSE, color = "darkgreen") +
+  labs(title = "Feedback success rate over time", subtitle = "Orange: sessions of mouse Cori, Green: sessions of mouse Lederberg", xlab = "Session Time", ylab = "Session Feedback")
+```
+
+I nextly observed if there are any differences between this relationship for each of the types of tests. 
+L and R tests have similarly appearing graphs: as time goes on, the feedback success experiences a small increase during the beginning of the trial, and then see a great decrease with time.
+I observe a very interesting relationship for N tests (when both visual stimuli have a contrast of 0). The feedback success seems to be positive and linear, showing that our two mice perhaps experience learning for this specific type of test as they are in the trial. I speculate that this is due to the nature of the test: when given this test, they see visual stimuli at no contrast and are meant to hold the wheel still, as opposed to the other tests, which have salient visual stimuli and are expected to move the wheel a certain direction. The fact that this is the only trial type that is drastically different may have contributed to this positive relationship.
+
+```{r, echo=FALSE}
+feed_time_no_e <- feed_time %>% filter(tmp_type != "e")
+custom_color <- c("orangered1", "orangered2", "orangered3", "olivedrab1", "olivedrab2", 
+              "olivedrab3", "olivedrab4", "chartreuse4", "green4", "darkgreen")
+ggplot(data = feed_time_no_e, aes(x = tmp_time, y = tmp_feed, group = session_n, color=as.factor(session_n) )) +
+  geom_smooth(method = "gam", se = FALSE) +
+  facet_wrap(~ tmp_type) +
+  scale_color_manual(values = custom_color) + 
+  labs(title = "Feedback success rate over time", subtitle = "Orange: sessions of mouse Cori, Green: sessions of mouse Lederberg", xlab = "Session Time", ylab = "Session Feedback")
+
+```
+E type tests are not graphed above due to the number of E tests present in each session being low. The histogram below shows that there are around 13 E test trials across the sessions with mice Cori and Lederberg. Since this n is small, I chose to exclude it from the above illustrative graphs. The histogram showing the distribution of success rate in E tests across the trials shows that the success rates are vastly varied. This is expected: the response that is deemed correct between sessions is varied and randomized.
+
+```{r, echo=FALSE}
+#for test types E only
+count_e_per_session <- c()
+success_e_per_session <- c()
+for (i in c(1, 2, 3, 12, 13, 14, 15, 16, 17, 18)) {
+  count_e_per_session <- append(count_e_per_session, feed_time %>% filter(tmp_type == "e", session_n == i) %>% nrow())
+  feedback_e_n <- (feed_time %>% filter(tmp_type == "e", session_n == i))$tmp_feed
+  success_rate_e_n <- sum(feedback_e_n == 1) / length(feedback_e_n)
+  success_e_per_session <- append(success_e_per_session, success_rate_e_n)
+}
+
+#print(count_e_per_session)
+#print(success_e_per_session)
+e_tests <- data.frame("session_n" = c(1, 2, 3, 12, 13, 14, 15, 16, 17, 18), count_e_per_session, success_e_per_session)
+
+ggplot(data = as.data.frame(count_e_per_session), aes(x=count_e_per_session)) + geom_histogram(bins=10) + labs(title = "Number of E tests for sessions of mice Cori and Lederberg", xlab = "Number of E tests per session")
+ggplot(data = e_tests, aes(x=success_e_per_session)) +geom_histogram(bins=10) + labs(title = "Distribution of success rate in E tests across sessions for mice Cori and Lederberg", xlab = "Success rate of E tests per session")
+```
+
+## Section 4: Predictive Modeling
+
+### Model 1: logistic regression with predictor variables firing rate, time, and test type using all sessions for each mice as train data
+
+From the above exploratory data analysis, I found that important variables to predict feedback include the firing rate of the mouse's neurons during the trial, the time throughout the session, and the test type (the type of contrast the visual stimuli showed.) With this in mind, I fitted a logistic regression model with the above predictors using data from all sessions for each mice. For Cori, that would be sessions 1-3, and for Lederberg, that would be sessions 12-18.
+
+Note that the predictive models for Cori and Lederberg are separated out into two models, but they can be combined using predictor variables. I chose to separate the two out for readability for this paper.
+
+The formulas for Model 1 are as follows, with subscripts C and L denoting which mouse the model is associated with.
+$$
+P_C(Feedback Success) = \frac{e^{-0.8389281592 + 1.3754587233Type_L + 0.8560625757Type_N + 0.5562895542Type_R + 32.3839808525FiringRate - 0.0007837949Time}}{1 + e^{-0.8389281592 + 1.3754587233Type_L + 0.8560625757Type_N + 0.5562895542Type_R + 32.3839808525FiringRate - 0.0007837949Time}}
+$$
+$$
+P_L(Feedback Success) = \frac{e^{0.5355806783 + 1.4633948255Type_L - 0.0588032032Type_N + 1.3529658915Type_R + 16.0952566422FiringRate - 0.0009716682Time}}{1 + e^{0.5355806783 + 1.4633948255Type_L - 0.0588032032Type_N + 1.3529658915Type_R + 16.0952566422FiringRate - 0.0009716682Time}}
+$$
+
+```{r, echo=FALSE}
+#creating a DF for Cori
+tmp_type <- c()
+for (i in 1:3){
+  for (j in session[[i]]$type) {
+    tmp_type <- append(tmp_type, j)
+  }
+}
+tmp_type <- as.factor(tmp_type)
+
+tmp_fr <- c()
+for (i in 1:3){
+  for (j in session[[i]]$firing_rate) {
+    tmp_fr <- append(tmp_fr, j)
+  }
+}
+
+tmp_feedback <- c()
+for (i in 1:3){
+  for (j in session[[i]]$feedback_type) {
+    if (j == -1) {
+      tmp_feedback <- append(tmp_feedback, 0)
+    } else {
+      tmp_feedback <- append(tmp_feedback, j)
+    }
+  }
+}
+
+#create column for time
+tmp_time <- c()
+tmp_session_n <- c()
+for (i in 1:3){
+  for (j in session[[i]]$time) {
+    tmp_time <- append(tmp_time, j[1])
+    tmp_session_n <- append(tmp_session_n, i)
+  }
+}
+Cori_df <- data.frame(tmp_type, tmp_fr, tmp_feedback, tmp_time, tmp_session_n)
+```
+
+The ROC curve for Model 1 (Cori) appears to be moderately flat, with an under-the-curve-area of 0.6574. The AIC, a criterion that should be minimized, is a little high at 743.34 for this particular model.
+
+```{r, echo=FALSE}
+#Cori log regr
+Cori_model1 <- glm(tmp_feedback ~ tmp_type + tmp_fr + tmp_time, data = Cori_df, family = "binomial")
+summary(Cori_model1)
+
+predicted_probabilities <- predict(Cori_model1, type = "response")
+roc_curve <- roc(Cori_df$tmp_feedback, predicted_probabilities)
+plot(roc_curve, main = "ROC Curve for Model 1 (Cori)", col = "blue", xlim = c(0, 1))
+auc(roc_curve)
+
+```
+
+
+
+```{r, echo=FALSE}
+#creating a DF for Lederberg
+
+#create column for type
+tmp_type <- c()
+for (i in 12:18){
+  for (j in session[[i]]$type) {
+    tmp_type <- append(tmp_type, j)
+  }
+}
+tmp_type <- as.factor(tmp_type)
+
+#create column for firing rate 
+tmp_fr <- c()
+for (i in 12:18){
+  for (j in session[[i]]$firing_rate) {
+    tmp_fr <- append(tmp_fr, j)
+  }
+}
+
+#create column for response
+tmp_feedback <- c()
+for (i in 12:18){
+  for (j in session[[i]]$feedback_type) {
+    if (j == -1) {
+      tmp_feedback <- append(tmp_feedback, 0)
+    } else {
+      tmp_feedback <- append(tmp_feedback, j)
+    }
+  }
+}
+
+#create column for time
+tmp_time <- c()
+tmp_session_n <- c()
+for (i in 12:18){
+  for (j in session[[i]]$time) {
+    tmp_time <- append(tmp_time, j[1])
+    tmp_session_n <- append(tmp_session_n, i)
+  }
+}
+
+Leder_df <- data.frame(tmp_type, tmp_fr, tmp_feedback, tmp_time, tmp_session_n)
+
+```
+
+The ROC Curve for Model 1 (Lederberg) is much more curved than that of Model 1 (Cori). However, it has an even higher AIC value, at 2027.8.
+```{r, echo=FALSE}
+#Leder log regr
+Leder_model1 <- glm(tmp_feedback ~ tmp_type + tmp_fr + tmp_time, data = Leder_df, family = "binomial")
+summary(Leder_model1)
+
+predicted_probabilities <- predict(Leder_model1, type = "response")
+roc_curve <- roc(Leder_df$tmp_feedback, predicted_probabilities)
+plot(roc_curve, main = "ROC Curve for Model 1 (Lederberg)", col = "blue", xlim = c(0, 1), ylim = c(0,1))
+auc(roc_curve)
+```
+Overall, the performance of model 1 seems to have a relatively decent AUC, but AIC values are quite high.
+
+Model 2 will be an improvement of Model 1. To acknowledge that there are large differences between sessions, I will use only data from the sessions that the test data comes from (in our case, that is sessions 1 and 18.) Since there is little data in those two sessions due to splitting between train and test data, I will conduct 1000 bootstrap samples to find better coefficients.
+
+```{r, echo=FALSE}
+#model comparison table
+labels <- c("Cori AUC", "Cori AIC", "Lederberg AUC", "Lederberg AIC")
+model1 <- c(0.6574, 743.34, 0.731, 2027.8)
+model_comparison_table <- data.frame(labels, model1)
+```
+
+
+## Model 2: bootstrapping from just sessions 1 and 18 (where the test data comes from)
+```{r, echo=FALSE, warning=FALSE}
+#Filtering for just trials from test data sessions
+Cori_df2 <- Cori_df %>% filter(tmp_session_n == 1)
+Leder_df2 <- Leder_df %>% filter(tmp_session_n == 18)
+
+#Cori
+Cori_model2 <- glm(tmp_feedback ~ tmp_type + tmp_fr + tmp_time, data = Cori_df2, family = "binomial")
+#summary(Cori_model2)
+predicted_probabilities <- predict(Cori_model2, type = "response")
+roc_curve <- roc(Cori_df2$tmp_feedback, predicted_probabilities)
+#plot(roc_curve, main = "ROC Curve", col = "blue", xlim = c(0, 1))
+#auc(roc_curve)
+
+#Lederberg
+Leder_model2 <- glm(tmp_feedback ~ tmp_type + tmp_fr + tmp_time, data = Leder_df2, family = "binomial")
+#summary(Leder_model2)
+predicted_probabilities <- predict(Leder_model2, type = "response")
+roc_curve <- roc(Leder_df2$tmp_feedback, predicted_probabilities)
+#plot(roc_curve, main = "ROC Curve", col = "blue", xlim = c(0, 1))
+#auc(roc_curve)
+
+```
+
+### Model 3: Model 2, with bootstrapping
+
+Below, I conducted 1000 bootstrap trials for Session 1 data. The histograms represent the distributions of coefficients in the 1000 trials. The red lines denote the 95% confidence interval, as the blue dashed line indicates the median of the coefficients. Upon visual inspection, all of the plots appear to be pretty normally distributed and have small standard deviations. The coefficient for firing rate (tmp_fr) seems to be an anomally, being slightly right-skewed. However, since the skew isn't very severe, I state that this plot is also generally normally distributed. The median coefficients (blue lines) are our model 2's coefficients.
+
+```{r, echo=FALSE}
+#bootstrapping for Cori
+coefficients_boot <- matrix(NA, nrow = 1000, ncol = 6)
+
+set.seed(93093863)
+for (i in 1:1000) {
+  bootstrap_data <- Cori_df2[sample(nrow(Cori_df2), replace = TRUE), ]
+  model_boot <- glm(tmp_feedback ~ tmp_type + tmp_fr + tmp_time, family = binomial(link = "logit"), data = bootstrap_data)
+  coefficients_boot[i, ] <- coef(model_boot)
+}
+```
+
+```{r, echo=FALSE}
+conf_intervals <- t(apply(coefficients_boot, 2, quantile, probs = c(0.025, 0.975)))
+median_coefs <- apply(coefficients_boot, 2, median)
+par(mfrow=c(2, 3))
+for (i in 1:length(coef(Cori_model2))) {
+  hist(coefficients_boot[, i], main = paste("Coefficient", names(coef(Cori_model2))[i]), xlab = "Coefficient Value", col = "skyblue", border = "black")
+  abline(v = conf_intervals[i, ], col = "red", lwd = 2)
+  abline(v = median_coefs[i], col = "blue", lwd = 2, lty = 2)
+}
+```
+
+```{r, echo=FALSE}
+Cori_model3 <- Cori_model2
+Leder_model3 <- Leder_model2
+```
+
+```{r, echo=FALSE, warning=FALSE}
+#Construct Cori model 2
+#note: model 3 = model 2 + bootstrapping. I state model 2 as being what model 3 is in my code.
+#print(median_coefs)
+Cori_model3$coefficients <- median_coefs
+#print(Cori_model3$coefficients)
+summary(Cori_model3)
+predicted_probabilities <- predict(Cori_model3, type = "response")
+roc_curve <- roc(Cori_df2$tmp_feedback, predicted_probabilities)
+plot(roc_curve, main = "ROC Curve for Model 2 (Cori)", col = "blue", xlim = c(0, 1))
+auc(roc_curve)
+```
+
+```{r, echo=FALSE}
+#bootstrapping for Lederberg
+coefficients_boot <- matrix(NA, nrow = 1000, ncol = 6)
+
+set.seed(9208285)
+for (i in 1:1000) {
+  bootstrap_data <- Leder_df2[sample(nrow(Leder_df2), replace = TRUE), ]
+  model_boot <- glm(tmp_feedback ~ tmp_type + tmp_fr + tmp_time, family = binomial(link = "logit"), data = bootstrap_data)
+  coefficients_boot[i, ] <- coef(model_boot)
+}
+```
+
+I conducted 1000 bootstrap trials for Session 18 data as I did for Session 1 data. The histograms represent the distributions of coefficients in the 1000 trials. The red lines denote the 95% confidence interval, as the blue dashed line indicates the median of the coefficients. Upon visual inspection, all of the plots appear to be pretty normally distributed and have small standard deviations.
+
+```{r, echo=FALSE}
+conf_intervals <- t(apply(coefficients_boot, 2, quantile, probs = c(0.025, 0.975)))
+median_coefs <- apply(coefficients_boot, 2, median)
+par(mfrow=c(2, 3))
+for (i in 1:length(coef(Leder_model2))) {
+  hist(coefficients_boot[, i], main = paste("Coefficient", names(coef(Leder_model2))[i]), xlab = "Coefficient Value", col = "yellow", border = "black")
+  abline(v = conf_intervals[i, ], col = "red", lwd = 2)
+  abline(v = median_coefs[i], col = "blue", lwd = 2, lty = 2)
+}
+```
+
+```{r, echo=FALSE}
+#Construct Leder model 3
+Leder_model3$coefficients <- median_coefs
+summary(Leder_model3)
+predicted_probabilities <- predict(Leder_model3, type = "response")
+roc_curve <- roc(Leder_df2$tmp_feedback, predicted_probabilities)
+plot(roc_curve, main = "ROC Curve for Model 3 (Leder)", col = "blue", xlim = c(0, 1))
+auc(roc_curve)
+
+```
+
+
+
+The formulas for this second model are as follows.
+
+$$
+P_C(Feedback Success) = \frac{e^{-5.837046 + 2.348356Type_L + 2.266190Type_N + 1.173079Type_R +  145.4933FiringRate - .0007931408Time}}{1 + e^{-5.837046 + 2.348356Type_L + 2.266190Type_N + 1.173079Type_R +  145.4933FiringRate - .0007931408Time}}
+$$
+$$
+P_L(Feedback Success) = \frac{e^{-5.750559060 + 2.248044573Type_L + 2.154182275Type_N + 1.062991577Type_R +  148.758809417FiringRate - 0.000777572Time}}{1 + e^{-5.750559060 + 2.248044573Type_L + 2.154182275Type_N + 1.062991577Type_R +  148.758809417FiringRate - 0.000777572Time}}
+$$
+
+I compare the models using this table. Since we want AUC values as close to 1 as possible and AIC values as low as possible, I select Model 2 as being the better predictive model for feedback type.
+```{r, echo=FALSE}
+#Model comparison table update
+model2 <- c(0.7787, 139.86, 0.7805, 192.62)
+model_comparison_table <- cbind(model_comparison_table, model2)
+
+print(model_comparison_table)
+```
+
+
+
+## Section 5: Prediction performance on the test sets
+
+Upon testing our prediction performance on the test sets,
+```{r, echo=FALSE}
+#import test data
+test_data=list()
+for(i in 1:2){
+  test_data[[i]]=readRDS(paste('./test/test',i,'.rds',sep=''))
+}
+```
+
+```{r, echo=FALSE}
+#firing rate
+for (k in 1:2) {
+  firing_rate <- c()
+  for (i in 1:length(test_data[[k]]$time)) {
+    new_fr <- sum(test_data[[k]]$spks[[i]] == 1) / (nrow(test_data[[k]]$spks[[i]]) * ncol(test_data[[k]]$spks[[i]]))
+    firing_rate <- append(firing_rate, new_fr)
+  }
+  test_data[[k]]$firing_rate <- firing_rate
+}
+```
+
+```{r, echo=FALSE}
+#add test type as a var to test_data
+td_test_type <- data.frame()
+for (j in 1:2) {
+  for (i in 1:length(test_data[[j]]$contrast_left)) {
+    if (test_data[[j]]$contrast_left[i] > test_data[[j]]$contrast_right[i]) {
+      td_test_type[i, j] <- "l"
+    } else if (test_data[[j]]$contrast_left[i] < test_data[[j]]$contrast_right[i]) {
+      td_test_type[i, j] <- "r"
+    } else if (test_data[[j]]$contrast_left[i] == 0 & test_data[[j]]$contrast_right[i] == 0) {
+      td_test_type[i, j] <- "n"
+    } else {
+      td_test_type[i, j] <- "e"
+    }
+  }
+}
+
+#add it to the test_data data
+test_type_tmp <- c()
+for (k in 1:2) {
+  test_type_tmp <- td_test_type[, k]
+  test_type_tmp <- test_type_tmp[complete.cases(td_test_type[, k])]
+  test_data[[k]]$type <- test_type_tmp
+}
+```
+
+
+```{r, echo=FALSE}
+#make df for Cori (session 1 test data)
+tmp_feedback <- test_data[[1]]$feedback_type
+tmp_fr <- test_data[[1]]$firing_rate
+tmp_type <- test_data[[1]]$type
+tmp_time <- c()
+tmp_session_n <- c()
+for (j in test_data[[1]]$time) {
+    tmp_time <- append(tmp_time, j[1])
+    tmp_session_n <- append(tmp_session_n, 1) }
+test_data_df_1 <- data.frame(tmp_feedback, tmp_time, tmp_session_n, tmp_fr, tmp_type)
+
+#make df for Lederberg (session 18 test data)
+tmp_feedback <- test_data[[2]]$feedback_type
+tmp_fr <- test_data[[2]]$firing_rate
+tmp_type <- test_data[[2]]$type
+tmp_time <- c()
+tmp_session_n <- c()
+for (j in test_data[[2]]$time) {
+    tmp_time <- append(tmp_time, j[1])
+    tmp_session_n <- append(tmp_session_n, 18) }
+test_data_df_2 <- data.frame(tmp_feedback, tmp_time, tmp_session_n, tmp_fr, tmp_type)
+```
+
+
+```{r, echo=FALSE}
+#testing Model 1
+#Cori
+predictions_C1 <- predict(Cori_model1, newdata = test_data_df_1, type = "response")
+binary_predictions_C1 <- unname(ifelse(predictions_C1 >= 0.5, 1, 0))
+binary_predictions_C1[binary_predictions_C1 == 0] <- -1
+print("Model 1 accuracy on Session 1 Test Data for Cori:")
+model1C_acc <- sum(binary_predictions_C1 == test_data[[1]]$feedback_type)/100
+print(model1C_acc)
+#Lederberg
+predictions_L1 <- predict(Leder_model1, newdata = test_data_df_2, type = "response")
+binary_predictions_L1 <- unname(ifelse(predictions_L1 >= 0.5, 1, 0))
+binary_predictions_L1[binary_predictions_L1 == 0] <- -1
+print("Model 1 accuracy on Session 18 Test Data for Lederberg:")
+model1L_acc <- sum(binary_predictions_L1 == test_data[[2]]$feedback_type)/100
+print(model1L_acc)
+
+#testing Model 2
+#Cori
+predictions_C2 <- predict(Cori_model3, newdata = test_data_df_1, type = "response")
+binary_predictions_C2 <- unname(ifelse(predictions_C2 >= 0.5, 1, 0))
+binary_predictions_C2[binary_predictions_C2 == 0] <- -1
+print("Model 2 accuracy on Session 1 Test Data for Cori:")
+model2C_acc <- sum(binary_predictions_C2 == test_data[[1]]$feedback_type)/100
+print(model2C_acc)
+#Lederberg
+predictions_L2 <- predict(Leder_model3, newdata = test_data_df_2, type = "response")
+binary_predictions_L2 <- unname(ifelse(predictions_L2 >= 0.5, 1, 0))
+binary_predictions_L2[binary_predictions_L2 == 0] <- -1
+print("Model 2 accuracy on Session 18 Test Data for Lederberg:")
+model2L_acc <- sum(binary_predictions_L2 == test_data[[2]]$feedback_type)/100
+print(model2L_acc)
+```
+The results are surprising: Model 1 has a higher accuracy on average between the two sessions. Model 1 (Cori) has a notably higher accuracy than the other predictions, which piques my interest; Model 1 (Cori) had a relatively high AIC and a relatively lower AUC than the other model and other part of Model 1 (for Lederberg).
+Model 2 has an average accuracy of 0.695, indicating that 69% of feedback is accurately predicted by our model.
+
+## Section 6: Discussion
+
+I am surprised by the results, as aforementioned, of my second model's prediction accuracy. Notably, I'm surprised by the accuracy for Cori (Session 1) of Model 1, given how high our AIC was and how low our AUC was relative to the other models. I speculate that these differences are due to overfitting, and losses due to omitted but predictive features. Beyond this, the results are relatively as expected. On average, 69% of feedback is accurately predicted by our model.
+
+Some challenges I faced in this project included coding, and understanding the data. Coding for bootstrapping became difficult: I had challenges with data representation across this entire project, but figured it out with making use of Stack Overflow conversations and ChatGPT debugging.
+With the unique format of our session data, I had a difficult time understanding its formatting (especially for brain_area and how that feature correlated with spikes data), which held me back in terms of my analyses.
+
+Overall, this was a very educationally valuable project, and it was a great learning opportunity for me to explore the uses of R and predictive modeling.
+
+## References
+
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
+
+ChatGPT conversations: 
+- https://chat.openai.com/share/24ce00ff-0754-4c46-8ea0-c36f9ae7a48e
+- https://chat.openai.com/share/ba78ba5b-9601-4991-9d12-529bfeb7167a
+
+Github code link: https://github.com/carinewong/STA141A_project
